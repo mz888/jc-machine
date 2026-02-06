@@ -1,0 +1,78 @@
+# Market Narrative Agent Configuration
+
+# Asset universe to track
+assets:
+  # Major indices (use Yahoo Finance symbols)
+  indices:
+    - "^GSPC"   # S&P 500
+    - "^IXIC"   # NASDAQ
+
+  # Individual stocks (MAG7)
+  stocks:
+    - "AAPL"    # Apple
+    - "MSFT"    # Microsoft
+    - "GOOGL"   # Alphabet
+    - "AMZN"    # Amazon
+    - "NVDA"    # NVIDIA
+    - "META"    # Meta
+    - "TSLA"    # Tesla
+
+  # Sector ETFs
+  sector_etfs:
+    - "XLF"     # Financials
+    - "XLE"     # Energy
+    - "XLK"     # Technology
+    - "XLV"     # Healthcare
+    - "XLI"     # Industrials
+    - "XLY"     # Consumer Discretionary
+    - "XLP"     # Consumer Staples
+    - "XLB"     # Materials
+    - "XLRE"    # Real Estate
+    - "XLU"     # Utilities
+    - "XLC"     # Communications
+
+  # Commodities
+  commodities:
+    - "CL=F"    # Crude Oil
+    - "GC=F"    # Gold
+
+  # Volatility
+  volatility:
+    - "^VIX"    # CBOE Volatility Index
+
+  # Treasury rates (will need special handling)
+  # 2-year, 5-year, 10-year, 30-year from FRED or Treasury.gov
+
+# Data source configuration
+data_sources:
+  prices_enabled: true
+  news_enabled: true
+  predictions_enabled: true
+
+# LLM configuration
+llm:
+  provider: "openai"
+  model_primary: "gpt-5.2"
+  model_fast: "gpt-5-mini"
+  max_tokens: 4000
+  temperature: 0.7
+
+# Data processing parameters
+processing:
+  significance_threshold: 0.03  # 3% move to be considered significant
+  volume_threshold: 1.5         # 1.5x average volume
+  max_assets_analyzed: 10       # Max number of assets to deep dive
+
+# Output configuration
+output:
+  formats:
+    - markdown
+    - json
+  storage_path: "./outputs"
+
+# Cache configuration
+cache:
+  enabled: true
+  ttl_prices: 300       # 5 minutes
+  ttl_news: 3600        # 1 hour
+  ttl_predictions: 21600  # 6 hours
