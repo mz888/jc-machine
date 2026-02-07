@@ -56,6 +56,7 @@ class AgentState(TypedDict):
     additional_data: Dict[str, Any]  # Flexible storage for tool outputs
 
     # Phase 4: Synthesis outputs
+    headline: str
     primary_narrative: str
     supporting_narratives: List[str]
     key_moves_explained: Dict[str, str]  # symbol -> explanation
@@ -83,6 +84,7 @@ def create_initial_state(date: Optional[datetime] = None) -> AgentState:
         selected_hypotheses=[],
         investigation_results=[],
         additional_data={},
+        headline="",
         primary_narrative="",
         supporting_narratives=[],
         key_moves_explained={},

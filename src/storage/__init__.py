@@ -1,5 +1,6 @@
 """Storage layer for market data, narratives, and cache."""
 
+from src.storage.database import NarrativeDatabase
 from src.storage.models import (
     AssetMove,
     DailyNarrative,
@@ -14,4 +15,5 @@ __all__ = [
     "NewsArticle",
     "Prediction",
     "DailyNarrative",
+    "NarrativeDatabase",
 ]

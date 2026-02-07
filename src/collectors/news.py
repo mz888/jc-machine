@@ -12,11 +12,13 @@ from src.collectors.base import CollectionParams, CollectionResult, DataCollecto
 
 
 # Default RSS feeds for financial news
+# Note: Some feeds (Reuters, Yahoo) were removed due to parse errors
 DEFAULT_RSS_FEEDS = [
-    "https://www.reutersagency.com/feed/?taxonomy=best-topics&post_type=best",
-    "https://feeds.finance.yahoo.com/rss/2.0/headline",
-    "https://www.cnbc.com/id/100003114/device/rss/rss.html",  # Top news
-    "https://www.cnbc.com/id/10000664/device/rss/rss.html",  # Business
+    "https://www.cnbc.com/id/100003114/device/rss/rss.html",  # CNBC Top News
+    "https://www.cnbc.com/id/10000664/device/rss/rss.html",  # CNBC Business
+    "https://www.cnbc.com/id/15839135/device/rss/rss.html",  # CNBC Markets
+    "https://www.ft.com/rss/home",  # Financial Times
+    "https://feeds.bloomberg.com/markets/news.rss",  # Bloomberg Markets (may require validation)
 ]
 
 

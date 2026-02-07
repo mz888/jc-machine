@@ -8,6 +8,7 @@ Defines the 4-phase workflow:
 """
 
 import json
+from datetime import datetime
 from typing import Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -102,6 +103,12 @@ async def observe_node(state: AgentState, config: RunnableConfig, llm) -> AgentS
         logger.info("Calling get_market_overview...")
         market_data = await get_market_overview.ainvoke({})
         state["tools_used"].append("get_market_overview")
+
+        # Store market data in additional_data (flexible storage for tool outputs)
+        # The dict structure works fine for investigation prompts and can be converted
+        # to MarketSnapshot when saving to database
+        state["additional_data"]["market_data_dict"] = market_data
+
         logger.info(f"  → Collected data on {len(market_data.get('major_indices', []))} indices, "
                    f"{len(market_data.get('biggest_gainers', []))} gainers, "
                    f"{len(market_data.get('biggest_losers', []))} losers")
@@ -293,14 +300,46 @@ async def investigate_node(state: AgentState, config: RunnableConfig, llm_with_t
             for q in hypothesis.get('questions_to_investigate', []):
                 logger.info(f"  • {q}")
 
+            # Prepare summary of already-collected data
+            market_data = state["additional_data"].get("market_data_dict", {})
+            available_data_summary = f"""
+ALREADY AVAILABLE FROM PHASE 1 OBSERVATION:
+- Major Indices: {', '.join(f'{k}: {v:+.2f}%' for k, v in market_data.get('major_indices', {}).items())}
+- Top Gainers: {', '.join(f"{m['symbol']} ({m['change_percent']:+.2f}%)" for m in market_data.get('biggest_gainers', [])[:5])}
+- Top Losers: {', '.join(f"{m['symbol']} ({m['change_percent']:+.2f}%)" for m in market_data.get('biggest_losers', [])[:5])}
+- Sector Performance: {', '.join(f'{k}: {v:+.2f}%' for k, v in list(market_data.get('sector_performance', {}).items())[:5])}
+- Market Breadth: {market_data.get('market_breadth')}
+- Volatility: {market_data.get('volatility')}
+- News Headlines: {len(state['news_headlines'])} articles already collected
+"""
+
             investigate_prompt = f"""You are investigating this market hypothesis:
 
 HYPOTHESIS: {hypothesis['hypothesis']}
 
+{available_data_summary}
+
 QUESTIONS TO INVESTIGATE:
 {json.dumps(hypothesis['questions_to_investigate'], indent=2)}
 
-Use the available tools to gather evidence. Call 2-3 relevant tools to investigate this hypothesis."""
+Use the available tools ONLY if you need data beyond what was already collected in Phase 1.
+
+RECOMMENDED TOOLS FOR INVESTIGATION:
+1. **get_stock_details(symbol)** - For specific stock analysis (volume, price history, volatility)
+2. **search_news(keywords, date_range)** - Search for specific events, catalysts, or company-specific news
+3. **get_prediction_markets(query)** - CHECK PROBABILITY CHANGES to validate market expectations
+   - Use this to validate hypotheses involving expectations, sentiment, or forward-looking catalysts
+   - Example: If NVDA beat expectations, search "NVIDIA earnings" or "NVDA stock price"
+   - Example: If Fed policy is mentioned, search "Fed rate" or "interest rate"
+   - Look for same-day probability changes that corroborate your hypothesis
+4. **get_correlated_moves(symbol, threshold)** - Identify related assets moving together
+
+IMPORTANT: Consider using prediction markets to validate your hypothesis. Market participants vote with money,
+so significant probability changes on the same day can provide strong evidence for or against your explanation.
+
+DO NOT re-call get_market_overview or get_sector_returns - that data is already available above.
+
+Call 2-3 relevant tools to investigate this hypothesis."""
 
             # Call LLM with tools - it will request tool executions
             logger.info(f"Calling LLM to request tools...")
@@ -509,12 +548,15 @@ Write in a clear, professional style. Focus on facts and evidence. Avoid hype or
 
 Provide your response in this JSON format:
 {{
+    "headline": "...",
     "primary_narrative": "...",
     "supporting_narratives": ["point 1", "point 2", ...],
     "unexplained_moves": ["move 1", ...],
     "looking_ahead": "...",
     "confidence_score": 0.75
-}}"""
+}}
+
+HEADLINE should be a concise, informative title (5-10 words) that captures the day's main story."""
 
         response = await llm.ainvoke([HumanMessage(content=synthesis_prompt)])
         content = response.content.strip()
@@ -528,6 +570,7 @@ Provide your response in this JSON format:
 
         synthesis = json.loads(content)
 
+        state["headline"] = synthesis.get("headline", "")
         state["primary_narrative"] = synthesis.get("primary_narrative", "")
         state["supporting_narratives"] = synthesis.get("supporting_narratives", [])
         state["unexplained_moves"] = synthesis.get("unexplained_moves", [])
@@ -557,6 +600,7 @@ Provide your response in this JSON format:
         state["errors"].append(f"Synthesis phase error: {str(e)}")
 
         # Fallback: create a basic narrative
+        state["headline"] = f"Market Analysis for {state['date'].strftime('%Y-%m-%d')}"
         state["primary_narrative"] = (
             f"Market analysis for {state['date'].strftime('%Y-%m-%d')}. "
             f"{state['initial_summary']}"

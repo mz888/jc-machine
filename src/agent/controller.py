@@ -117,6 +117,9 @@ class AgentController:
             logger.info("Executing LangGraph workflow...")
             final_state = await self.graph.ainvoke(initial_state)
 
+            # Store last state for orchestrator access
+            self.last_state = final_state
+
             # Convert final state to DailyNarrative
             narrative = self._state_to_narrative(final_state)
 
@@ -152,7 +155,7 @@ class AgentController:
 
         return DailyNarrative(
             date=state["date"],
-            headline=self._generate_headline(state),
+            headline=state["headline"] or f"Market Analysis for {state['date'].strftime('%Y-%m-%d')}",
             primary_narrative=state["primary_narrative"],
             supporting_narratives=state["supporting_narratives"],
             key_moves_explained=key_moves_list,
