@@ -3,6 +3,7 @@
 These tools are called by the LLM during different phases of analysis.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -13,17 +14,23 @@ from src.analysis.processor import DataProcessor
 from src.collectors.base import CollectionParams
 from src.collectors.news import NewsCollector
 from src.collectors.prediction import PredictionCollector
-from src.collectors.price import PriceCollector, fetch_all_assets
+from src.collectors.price import PriceCollector
 from src.config import Config
-from src.storage.models import MarketSnapshot
 
 
-# Initialize collectors (will be injected by controller)
-_price_collector: Optional[PriceCollector] = None
-_news_collector: Optional[NewsCollector] = None
-_prediction_collector: Optional[PredictionCollector] = None
-_data_processor: Optional[DataProcessor] = None
-_config: Optional[Config] = None
+@dataclass
+class ToolContext:
+    """Holds all collector/processor dependencies for the tools."""
+
+    price_collector: PriceCollector
+    news_collector: NewsCollector
+    prediction_collector: PredictionCollector
+    data_processor: DataProcessor
+    config: Config
+
+
+# Module-level context, set once by initialize_tools()
+_ctx: Optional[ToolContext] = None
 
 
 def initialize_tools(
@@ -32,17 +39,23 @@ def initialize_tools(
     prediction_collector: PredictionCollector,
     data_processor: DataProcessor,
     config: Config,
-):
-    """Initialize tool dependencies.
+) -> None:
+    """Initialize tool dependencies. Must be called before using any tools."""
+    global _ctx
+    _ctx = ToolContext(
+        price_collector=price_collector,
+        news_collector=news_collector,
+        prediction_collector=prediction_collector,
+        data_processor=data_processor,
+        config=config,
+    )
 
-    This must be called before using any tools.
-    """
-    global _price_collector, _news_collector, _prediction_collector, _data_processor, _config
-    _price_collector = price_collector
-    _news_collector = news_collector
-    _prediction_collector = prediction_collector
-    _data_processor = data_processor
-    _config = config
+
+def _require_ctx() -> ToolContext:
+    """Return the tool context, raising clearly if not yet initialised."""
+    if _ctx is None:
+        raise RuntimeError("Tools not initialized. Call initialize_tools() first.")
+    return _ctx
 
 
 # =============================================================================
@@ -62,31 +75,26 @@ async def get_market_overview(date: Optional[str] = None) -> Dict:
     """
     logger.info("Tool: get_market_overview called")
 
-    if _price_collector is None or _data_processor is None or _config is None:
-        raise RuntimeError("Tools not initialized. Call initialize_tools() first.")
-
-    # Parse date
+    ctx = _require_ctx()
     target_date = datetime.fromisoformat(date) if date else datetime.now()
 
-    # Fetch all assets from config
     symbols = (
-        _config.indices
-        + _config.stocks
-        + _config.sector_etfs
-        + _config.commodities
-        + _config.volatility_indices
+        ctx.config.indices
+        + ctx.config.stocks
+        + ctx.config.sector_etfs
+        + ctx.config.commodities
+        + ctx.config.volatility_indices
     )
 
     params = CollectionParams(symbols=symbols, date=target_date)
-    result = await _price_collector.collect(params)
+    result = await ctx.price_collector.collect(params)
 
-    # Create market snapshot
-    snapshot = _data_processor.create_market_snapshot(
+    snapshot = ctx.data_processor.create_market_snapshot(
         result.data,
         date=target_date,
-        index_symbols=_config.indices,
-        sector_symbols=_config.sector_etfs,
-        volatility_symbols=_config.volatility_indices,
+        index_symbols=ctx.config.indices,
+        sector_symbols=ctx.config.sector_etfs,
+        volatility_symbols=ctx.config.volatility_indices,
     )
 
     return {
@@ -128,13 +136,11 @@ async def get_sector_returns(date: Optional[str] = None) -> Dict[str, float]:
     """
     logger.info("Tool: get_sector_returns called")
 
-    if _price_collector is None or _config is None:
-        raise RuntimeError("Tools not initialized. Call initialize_tools() first.")
-
+    ctx = _require_ctx()
     target_date = datetime.fromisoformat(date) if date else datetime.now()
 
-    params = CollectionParams(symbols=_config.sector_etfs, date=target_date)
-    result = await _price_collector.collect(params)
+    params = CollectionParams(symbols=ctx.config.sector_etfs, date=target_date)
+    result = await ctx.price_collector.collect(params)
 
     return {item["symbol"]: item["change_percent"] for item in result.data}
 
@@ -152,18 +158,13 @@ async def get_top_movers(n: int = 10, date: Optional[str] = None) -> Dict:
     """
     logger.info(f"Tool: get_top_movers called (n={n})")
 
-    if _price_collector is None or _data_processor is None or _config is None:
-        raise RuntimeError("Tools not initialized. Call initialize_tools() first.")
-
+    ctx = _require_ctx()
     target_date = datetime.fromisoformat(date) if date else datetime.now()
 
-    # Fetch all stocks
-    symbols = _config.stocks
-    params = CollectionParams(symbols=symbols, date=target_date)
-    result = await _price_collector.collect(params)
+    params = CollectionParams(symbols=ctx.config.stocks, date=target_date)
+    result = await ctx.price_collector.collect(params)
 
-    # Get biggest movers
-    gainers, losers = _data_processor.get_biggest_movers(result.data, n=n)
+    gainers, losers = ctx.data_processor.get_biggest_movers(result.data, n=n)
 
     return {
         "gainers": [
@@ -200,11 +201,9 @@ async def get_news_headlines(limit: int = 50, keywords: Optional[List[str]] = No
     """
     logger.info(f"Tool: get_news_headlines called (limit={limit}, keywords={keywords})")
 
-    if _news_collector is None:
-        raise RuntimeError("Tools not initialized. Call initialize_tools() first.")
-
+    ctx = _require_ctx()
     params = CollectionParams(limit=limit, keywords=keywords)
-    result = await _news_collector.collect(params)
+    result = await ctx.news_collector.collect(params)
 
     return [
         {
@@ -236,13 +235,11 @@ async def get_stock_details(symbol: str, date: Optional[str] = None) -> Dict:
     """
     logger.info(f"Tool: get_stock_details called (symbol={symbol})")
 
-    if _price_collector is None:
-        raise RuntimeError("Tools not initialized. Call initialize_tools() first.")
-
+    ctx = _require_ctx()
     target_date = datetime.fromisoformat(date) if date else datetime.now()
 
     params = CollectionParams(symbols=[symbol], date=target_date)
-    result = await _price_collector.collect(params)
+    result = await ctx.price_collector.collect(params)
 
     if not result.data:
         return {"error": f"No data found for {symbol}"}
@@ -275,13 +272,11 @@ async def search_news(
     """
     logger.info(f"Tool: search_news called (keywords={keywords})")
 
-    if _news_collector is None:
-        raise RuntimeError("Tools not initialized. Call initialize_tools() first.")
-
+    ctx = _require_ctx()
     target_date = datetime.fromisoformat(date) if date else None
 
     params = CollectionParams(keywords=keywords, limit=limit, date=target_date)
-    result = await _news_collector.collect(params)
+    result = await ctx.news_collector.collect(params)
 
     return [
         {
@@ -308,11 +303,9 @@ async def get_prediction_markets(keywords: Optional[List[str]] = None, limit: in
     """
     logger.info(f"Tool: get_prediction_markets called (keywords={keywords})")
 
-    if _prediction_collector is None:
-        raise RuntimeError("Tools not initialized. Call initialize_tools() first.")
-
+    ctx = _require_ctx()
     params = CollectionParams(keywords=keywords, limit=limit)
-    result = await _prediction_collector.collect(params)
+    result = await ctx.prediction_collector.collect(params)
 
     return [
         {
@@ -342,23 +335,20 @@ async def get_correlated_moves(
     """
     logger.info(f"Tool: get_correlated_moves called (symbol={symbol}, threshold={threshold})")
 
-    if _price_collector is None or _data_processor is None or _config is None:
-        raise RuntimeError("Tools not initialized. Call initialize_tools() first.")
-
+    ctx = _require_ctx()
     target_date = datetime.fromisoformat(date) if date else datetime.now()
 
-    # Get the target stock's move
-    target_params = CollectionParams(symbols=[symbol], date=target_date)
-    target_result = await _price_collector.collect(target_params)
+    # Fetch the target symbol together with all tracked stocks in one API call.
+    # Using a set avoids duplicating the symbol if it already appears in stocks.
+    symbols_to_fetch = list(set([symbol] + ctx.config.stocks))
+    all_params = CollectionParams(symbols=symbols_to_fetch, date=target_date)
+    all_result = await ctx.price_collector.collect(all_params)
 
-    if not target_result.data:
+    target_data = next((d for d in all_result.data if d["symbol"] == symbol), None)
+    if not target_data:
         return []
 
-    target_change = target_result.data[0]["change_percent"]
-
-    # Get all stocks
-    all_params = CollectionParams(symbols=_config.stocks, date=target_date)
-    all_result = await _price_collector.collect(all_params)
+    target_change = target_data["change_percent"]
 
     # Find correlated moves (same direction, similar magnitude)
     correlated = []

@@ -59,7 +59,7 @@ class AgentState(TypedDict):
     headline: str
     primary_narrative: str
     supporting_narratives: List[str]
-    key_moves_explained: Dict[str, str]  # symbol -> explanation
+    key_moves_explained: List[Dict[str, Any]]  # [{"symbol": ..., "explanation": ...}]
     unexplained_moves: List[str]
     prediction_insights: List[str]
     confidence_score: float
@@ -87,7 +87,7 @@ def create_initial_state(date: Optional[datetime] = None) -> AgentState:
         headline="",
         primary_narrative="",
         supporting_narratives=[],
-        key_moves_explained={},
+        key_moves_explained=[],
         unexplained_moves=[],
         prediction_insights=[],
         confidence_score=0.0,

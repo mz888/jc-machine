@@ -8,10 +8,11 @@ Defines the 4-phase workflow:
 """
 
 import json
+import re
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Optional
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from loguru import logger
@@ -28,13 +29,27 @@ from src.agent.tools import (
     get_top_movers,
     search_news,
 )
+from src.config import Config
 
 
-def create_agent_graph(llm):
+def _parse_json_response(content: str) -> dict:
+    """Parse JSON from an LLM response, stripping markdown code fences if present."""
+    content = content.strip()
+    if content.startswith("```"):
+        parts = content.split("```")
+        if len(parts) >= 2:
+            content = parts[1]
+            if content.startswith("json"):
+                content = content[4:]
+    return json.loads(content.strip())
+
+
+def create_agent_graph(llm, config: Optional[Config] = None):
     """Create the LangGraph state machine for the agent.
 
     Args:
         llm: LangChain LLM instance (e.g., ChatOpenAI or ChatAnthropic)
+        config: Application configuration (used for processing limits)
 
     Returns:
         Compiled LangGraph workflow
@@ -42,6 +57,10 @@ def create_agent_graph(llm):
     # Bind tools to the LLM
     tools = get_all_tools()
     llm_with_tools = llm.bind_tools(tools)
+
+    # Extract configurable limits (with safe defaults)
+    max_hypotheses = config.processing.max_hypotheses_investigated if config else 2
+    max_tool_calls = config.processing.max_tool_calls_per_hypothesis if config else 5
 
     # Create state graph with LLM attached to config
     workflow = StateGraph(AgentState)
@@ -60,7 +79,9 @@ def create_agent_graph(llm):
         return await hypothesize_node(state, config, workflow.llm)
 
     async def investigate_wrapper(state, config):
-        return await investigate_node(state, config, workflow.llm_with_tools)
+        return await investigate_node(
+            state, config, workflow.llm_with_tools, max_hypotheses, max_tool_calls
+        )
 
     async def synthesize_wrapper(state, config):
         return await synthesize_node(state, config, workflow.llm)
@@ -109,18 +130,18 @@ async def observe_node(state: AgentState, config: RunnableConfig, llm) -> AgentS
         # to MarketSnapshot when saving to database
         state["additional_data"]["market_data_dict"] = market_data
 
-        logger.info(f"  → Collected data on {len(market_data.get('major_indices', []))} indices, "
-                   f"{len(market_data.get('biggest_gainers', []))} gainers, "
-                   f"{len(market_data.get('biggest_losers', []))} losers")
+        gainers = market_data.get("biggest_gainers", [])
+        losers = market_data.get("biggest_losers", [])
+        logger.info(f"  → Collected data on {len(market_data.get('major_indices', {}))} indices, "
+                   f"{len(gainers)} gainers, {len(losers)} losers")
 
-        # 2. Get top movers
-        logger.info("Calling get_top_movers...")
-        movers_data = await get_top_movers.ainvoke({"n": 10})
-        state["tools_used"].append("get_top_movers")
-        logger.info(f"  → Top gainer: {movers_data['gainers'][0]['symbol']} "
-                   f"({movers_data['gainers'][0]['change_percent']:+.2f}%)")
-        logger.info(f"  → Top loser: {movers_data['losers'][0]['symbol']} "
-                   f"({movers_data['losers'][0]['change_percent']:+.2f}%)")
+        # 2. Extract top movers from already-fetched market data (no extra API call)
+        if gainers:
+            logger.info(f"  → Top gainer: {gainers[0]['symbol']} "
+                       f"({gainers[0]['change_percent']:+.2f}%)")
+        if losers:
+            logger.info(f"  → Top loser: {losers[0]['symbol']} "
+                       f"({losers[0]['change_percent']:+.2f}%)")
 
         # 3. Get news headlines
         logger.info("Calling get_news_headlines...")
@@ -134,13 +155,15 @@ async def observe_node(state: AgentState, config: RunnableConfig, llm) -> AgentS
         # 4. Use LLM to analyze and summarize
         logger.info("Analyzing observation data with LLM...")
 
+        top_movers_summary = {"gainers": gainers[:5], "losers": losers[:5]}
+
         observation_prompt = f"""You are a financial market analyst. Analyze the following market data and provide a concise summary of the key observations.
 
 MARKET DATA:
 {json.dumps(market_data, indent=2, default=str)}
 
 TOP MOVERS:
-{json.dumps(movers_data, indent=2, default=str)}
+{json.dumps(top_movers_summary, indent=2, default=str)}
 
 NEWS HEADLINES (sample):
 {json.dumps(news_data[:5], indent=2, default=str)}
@@ -208,17 +231,7 @@ Format your response as a JSON array of objects with these fields:
 Respond with ONLY the JSON array, no other text."""
 
         response = await llm.ainvoke([HumanMessage(content=hypothesis_prompt)])
-        content = response.content.strip()
-
-        # Parse JSON response
-        # Remove markdown code blocks if present
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-
-        hypotheses = json.loads(content)
+        hypotheses = _parse_json_response(response.content)
 
         state["hypotheses"] = hypotheses
 
@@ -263,7 +276,13 @@ Respond with ONLY the JSON array, no other text."""
     return state
 
 
-async def investigate_node(state: AgentState, config: RunnableConfig, llm_with_tools) -> AgentState:
+async def investigate_node(
+    state: AgentState,
+    config: RunnableConfig,
+    llm_with_tools,
+    max_hypotheses: int = 2,
+    max_tool_calls: int = 5,
+) -> AgentState:
     """Phase 3: Investigation - Test hypotheses with targeted queries.
 
     This node:
@@ -280,7 +299,7 @@ async def investigate_node(state: AgentState, config: RunnableConfig, llm_with_t
 
     try:
         # Investigate each selected hypothesis
-        for i, hypothesis_text in enumerate(state["selected_hypotheses"][:2]):  # Limit to 2 for cost
+        for i, hypothesis_text in enumerate(state["selected_hypotheses"][:max_hypotheses]):
             logger.info(f"\n{'='*60}")
             logger.info(f"INVESTIGATING HYPOTHESIS {i+1}")
             logger.info(f"{'='*60}")
@@ -352,13 +371,16 @@ Call 2-3 relevant tools to investigate this hypothesis."""
                 for tc in response.tool_calls:
                     logger.info(f"  • {tc.get('name', 'unknown')} with args: {tc.get('args', {})}")
 
-                # Execute the tool calls
-                messages.append(response)  # Add the AIMessage with tool calls
+                # Truncate to the calls we will actually execute, then build a
+                # filtered AIMessage.  Every tool_call_id in the AIMessage MUST
+                # have a matching ToolMessage or the OpenAI API returns a 400.
+                calls_to_execute = response.tool_calls[:max_tool_calls]
+                filtered_ai_msg = AIMessage(
+                    content=response.content or "",
+                    tool_calls=calls_to_execute,
+                )
+                messages.append(filtered_ai_msg)
 
-                # Import and map tools
-                from langchain_core.messages import ToolMessage
-
-                # Import investigation tools
                 tool_map = {
                     "search_news": search_news,
                     "get_stock_details": get_stock_details,
@@ -370,8 +392,7 @@ Call 2-3 relevant tools to investigate this hypothesis."""
                     "get_sector_returns": get_sector_returns,
                 }
 
-                # Execute each tool call (limit to first 3 for cost)
-                for tc in response.tool_calls[:3]:
+                for tc in calls_to_execute:
                     tool_name = tc.get("name")
                     tool_args = tc.get("args", {})
                     tool_id = tc.get("id", "unknown")
@@ -408,63 +429,64 @@ Call 2-3 relevant tools to investigate this hypothesis."""
                     else:
                         logger.warning(f"  → Unknown tool: {tool_name}")
 
-                # Now call LLM again with tool results to get analysis
+                # Now call LLM again with tool results to get structured analysis
                 analysis_prompt = f"""Based on the tool results above, analyze this hypothesis:
 
 HYPOTHESIS: {hypothesis['hypothesis']}
 
-Provide:
-1. Summary of evidence SUPPORTING the hypothesis
-2. Summary of evidence CONTRADICTING the hypothesis
-3. Confidence adjustment (-0.5 to +0.5)
-4. Brief explanation of your reasoning
+Respond with ONLY this JSON object (no other text):
+{{
+  "supporting": "one-paragraph summary of evidence supporting the hypothesis",
+  "contradicting": "one-paragraph summary of evidence against the hypothesis (empty string if none)",
+  "confidence_adjustment": 0.1,
+  "reasoning": "one sentence explaining your confidence adjustment"
+}}
 
-Keep your response concise (2-3 paragraphs max)."""
+The confidence_adjustment must be a float between -0.5 and +0.5."""
 
                 messages.append(HumanMessage(content=analysis_prompt))
                 logger.info(f"Calling LLM to analyze tool results...")
                 final_response = await llm_with_tools.ainvoke(messages)
-                analysis = final_response.content
+                raw_analysis = final_response.content or ""
 
                 logger.info(f"LLM Final Analysis (first 300 chars):")
-                logger.info(f"  {analysis[:300]}...")
+                logger.info(f"  {raw_analysis[:300]}...")
 
             else:
                 logger.info("No tool calls requested by LLM - using direct analysis")
-                analysis = response.content if response.content else "Unable to analyze hypothesis"
+                raw_analysis = response.content if response.content else ""
                 logger.info(f"LLM Analysis (first 300 chars):")
-                logger.info(f"  {analysis[:300]}...")
+                logger.info(f"  {raw_analysis[:300]}...")
 
-            # Parse the analysis to extract confidence adjustment (simple heuristic)
-            # Look for phrases like "+0.2" or "increase by 0.15"
+            # Parse structured JSON analysis
             adjustment = 0.1  # Default
-            import re
-            confidence_match = re.search(r'[+-]?\s*0?\.\d+', analysis)
-            if confidence_match:
-                try:
-                    parsed_adj = float(confidence_match.group().replace(' ', ''))
-                    if -0.5 <= parsed_adj <= 0.5:
-                        adjustment = parsed_adj
-                except:
-                    pass
-
-            final_confidence = min(1.0, max(0.0, hypothesis["confidence"] + adjustment))
-
-            # Extract supporting/contradicting evidence (simplified)
             supporting = []
             contradicting = []
-            if "support" in analysis.lower():
-                supporting.append("Analysis found supporting evidence from tool results")
-            else:
+            try:
+                analysis_data = _parse_json_response(raw_analysis)
+                adjustment = float(analysis_data.get("confidence_adjustment", 0.1))
+                adjustment = max(-0.5, min(0.5, adjustment))
+                if analysis_data.get("supporting"):
+                    supporting.append(analysis_data["supporting"])
+                if analysis_data.get("contradicting"):
+                    contradicting.append(analysis_data["contradicting"])
+            except (json.JSONDecodeError, ValueError, KeyError):
+                # Fallback: keep defaults and do a simple keyword scan on raw text
+                if "support" in raw_analysis.lower():
+                    supporting.append("Analysis found supporting evidence from tool results")
+                if "contradict" in raw_analysis.lower() or "against" in raw_analysis.lower():
+                    contradicting.append("Analysis found contradicting evidence")
+
+            if not supporting:
                 supporting.append("Hypothesis appears consistent with observations")
-            if "contradict" in analysis.lower() or "against" in analysis.lower():
-                contradicting.append("Analysis found contradicting evidence")
+
+            final_confidence = min(1.0, max(0.0, hypothesis["confidence"] + adjustment))
 
             result = {
                 "hypothesis": hypothesis_text,
                 "supporting_evidence": supporting,
                 "contradicting_evidence": contradicting,
-                "additional_context": [analysis[:500]],  # Increased to capture more detail
+                "additional_context": [raw_analysis[:500]],
                 "confidence_adjustment": adjustment,
                 "final_confidence": final_confidence,
             }
@@ -559,16 +581,7 @@ Provide your response in this JSON format:
 HEADLINE should be a concise, informative title (5-10 words) that captures the day's main story."""
 
         response = await llm.ainvoke([HumanMessage(content=synthesis_prompt)])
-        content = response.content.strip()
-
-        # Parse JSON response
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-
-        synthesis = json.loads(content)
+        synthesis = _parse_json_response(response.content)
 
         state["headline"] = synthesis.get("headline", "")
         state["primary_narrative"] = synthesis.get("primary_narrative", "")
@@ -578,7 +591,7 @@ HEADLINE should be a concise, informative title (5-10 words) that captures the d
         state["confidence_score"] = synthesis.get("confidence_score", 0.7)
 
         # Extract key moves explained (simplified)
-        state["key_moves_explained"] = {}
+        state["key_moves_explained"] = []
 
         logger.info("Narrative synthesis complete")
         logger.info(f"Primary narrative ({len(state['primary_narrative'])} chars):")

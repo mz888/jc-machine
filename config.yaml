@@ -62,6 +62,8 @@ processing:
   significance_threshold: 0.03  # 3% move to be considered significant
   volume_threshold: 1.5         # 1.5x average volume
   max_assets_analyzed: 10       # Max number of assets to deep dive
+  max_hypotheses_investigated: 2   # Hypotheses to investigate per run
+  max_tool_calls_per_hypothesis: 5 # Tool calls allowed per hypothesis
 
 # Output configuration
 output:

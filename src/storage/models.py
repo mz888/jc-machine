@@ -22,10 +22,10 @@ class MarketSnapshot(BaseModel):
     """Snapshot of market state at a point in time."""
 
     date: datetime = Field(description="Snapshot date")
-    major_indices: dict[str, float] = Field(description="Index returns (symbol: change%)")
+    major_indices: Dict[str, float] = Field(description="Index returns (symbol: change%)")
     biggest_gainers: List[AssetMove] = Field(description="Top gaining assets")
     biggest_losers: List[AssetMove] = Field(description="Top losing assets")
-    sector_performance: dict[str, float] = Field(description="Sector returns")
+    sector_performance: Dict[str, float] = Field(description="Sector returns")
     market_breadth: Optional[Dict[str, int]] = Field(
         default=None, description="Advancers/decliners/unchanged"
     )

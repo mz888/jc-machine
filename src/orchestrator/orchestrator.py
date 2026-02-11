@@ -35,6 +35,7 @@ class Orchestrator:
 
         # Initialize database
         self.database = NarrativeDatabase(Path("./data/narratives.db"))
+        self._db_initialized = False
 
         logger.info("Orchestrator initialized successfully")
 
@@ -53,8 +54,10 @@ class Orchestrator:
 
         logger.info(f"Starting daily narrative generation for {date.date()}")
 
-        # Initialize database tables
-        await self.database.create_tables()
+        # Ensure tables exist (only runs once per process lifetime)
+        if not self._db_initialized:
+            await self.database.create_tables()
+            self._db_initialized = True
 
         # Set up log capture
         log_stream = io.StringIO()

@@ -5,7 +5,7 @@ This module orchestrates the entire agent workflow using LangGraph.
 
 import os
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
@@ -66,7 +66,7 @@ class AgentController:
         self.llm = self._create_llm()
 
         # Create LangGraph workflow
-        self.graph = create_agent_graph(self.llm)
+        self.graph = create_agent_graph(self.llm, config=self.config)
 
         logger.info("AgentController initialized successfully")
 
@@ -139,11 +139,7 @@ class AgentController:
         Returns:
             DailyNarrative for output/storage
         """
-        # Convert key_moves_explained from Dict[str, str] to List[dict]
-        key_moves_list = [
-            {"symbol": symbol, "explanation": explanation}
-            for symbol, explanation in state["key_moves_explained"].items()
-        ]
+        key_moves_list = state["key_moves_explained"]  # already List[dict]
 
         # Convert prediction_insights from List[str] to List[dict] if needed
         prediction_insights_list = []
@@ -171,27 +167,7 @@ class AgentController:
             },
         )
 
-    def _generate_headline(self, state: AgentState) -> str:
-        """Generate a headline from the primary narrative.
-
-        Args:
-            state: Final agent state
-
-        Returns:
-            Short headline string
-        """
-        # Simple implementation: Take first sentence or truncate
-        narrative = state["primary_narrative"]
-        if not narrative:
-            return f"Market Analysis for {state['date'].strftime('%Y-%m-%d')}"
-
-        # Take first sentence or first 80 characters
-        first_sentence = narrative.split(".")[0]
-        if len(first_sentence) <= 80:
-            return first_sentence
-        return first_sentence[:77] + "..."
-
-    def _get_data_sources(self, state: AgentState) -> list[str]:
+    def _get_data_sources(self, state: AgentState) -> List[str]:
         """Extract data sources used from state.
 
         Args:

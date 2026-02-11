@@ -1,7 +1,7 @@
 """Data processor for analyzing market data and creating market snapshots."""
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -79,7 +79,7 @@ class DataProcessor:
 
     def get_biggest_movers(
         self, price_data: List[Dict], n: int = 10
-    ) -> tuple[List[AssetMove], List[AssetMove]]:
+    ) -> Tuple[List[AssetMove], List[AssetMove]]:
         """
         Get top N gainers and losers.
 
@@ -98,7 +98,7 @@ class DataProcessor:
 
         # Get top gainers and losers
         biggest_gainers = moves_sorted[:n]
-        biggest_losers = moves_sorted[-n:][::-1]  # Reverse to show worst first
+        biggest_losers = sorted(moves, key=lambda x: x.change_percent)[:n]
 
         logger.debug(f"Top {n} gainers and losers identified")
         return biggest_gainers, biggest_losers
@@ -265,7 +265,7 @@ class DataProcessor:
 
     def filter_by_significance(
         self, snapshot: MarketSnapshot, threshold: Optional[float] = None
-    ) -> tuple[List[AssetMove], List[AssetMove]]:
+    ) -> Tuple[List[AssetMove], List[AssetMove]]:
         """
         Filter snapshot movers by significance threshold.
 

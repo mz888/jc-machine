@@ -42,6 +42,12 @@ class NewsCollector(DataCollector):
         super().__init__(cache_enabled)
         self.newsapi_key = newsapi_key
         self.rss_feeds = rss_feeds or DEFAULT_RSS_FEEDS
+        # Two-level cache:
+        #   _rss_cache  – keyed by date only; stores all raw RSS articles before
+        #                 keyword filtering.  Re-used across search_news calls with
+        #                 different keywords so RSS endpoints are only hit once.
+        #   _cache      – keyed by date + keywords; stores the final filtered result.
+        self._rss_cache: Dict[str, List[Dict]] = {}
         self._cache: Dict[str, List[Dict]] = {}
 
     @property
@@ -223,8 +229,11 @@ class NewsCollector(DataCollector):
         """
         logger.info("Collecting news articles")
 
-        # Check cache
-        cache_key = f"news_{params.date or 'latest'}_{','.join(params.keywords or [])}"
+        date_key = params.date.strftime("%Y-%m-%d") if params.date else "latest"
+        keywords_key = ",".join(sorted(params.keywords or []))
+        cache_key = f"news_{date_key}_{keywords_key}"
+
+        # Check final-result cache (date + keywords)
         if self.cache_enabled and cache_key in self._cache:
             logger.debug("Using cached news data")
             return CollectionResult(
@@ -234,17 +243,27 @@ class NewsCollector(DataCollector):
                 metadata={"cached": True},
             )
 
-        all_articles = []
         sources_used = []
 
-        # Fetch from RSS feeds
-        for feed_url in self.rss_feeds:
-            articles = self._parse_rss_feed(feed_url, limit=params.limit)
-            all_articles.extend(articles)
-            if articles:
-                sources_used.append(f"RSS: {feed_url}")
+        # --- Level 1: raw RSS cache (keyed by date only) ---
+        rss_cache_key = f"rss_{date_key}"
+        if self.cache_enabled and rss_cache_key in self._rss_cache:
+            logger.debug("Using cached raw RSS articles")
+            rss_articles = self._rss_cache[rss_cache_key]
+            sources_used.extend(f"RSS: {url}" for url in self.rss_feeds)
+        else:
+            rss_articles = []
+            for feed_url in self.rss_feeds:
+                articles = self._parse_rss_feed(feed_url)
+                rss_articles.extend(articles)
+                if articles:
+                    sources_used.append(f"RSS: {feed_url}")
+            if self.cache_enabled:
+                self._rss_cache[rss_cache_key] = rss_articles
 
-        # Fetch from NewsAPI if key available
+        all_articles = list(rss_articles)
+
+        # Fetch from NewsAPI if key available (still per-keyword; API returns different results)
         if self.newsapi_key:
             newsapi_articles = await self._fetch_newsapi(
                 keywords=params.keywords,
@@ -304,6 +323,7 @@ class NewsCollector(DataCollector):
         )
 
     def clear_cache(self):
-        """Clear the internal cache."""
+        """Clear the internal cache (both levels)."""
         self._cache.clear()
+        self._rss_cache.clear()
         logger.debug("News collector cache cleared")

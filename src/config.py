@@ -59,6 +59,8 @@ class ProcessingConfig(BaseModel):
     significance_threshold: float = 0.03  # 3% move
     volume_threshold: float = 1.5  # 1.5x average volume
     max_assets_analyzed: int = 10
+    max_hypotheses_investigated: int = 2  # hypotheses to investigate per run
+    max_tool_calls_per_hypothesis: int = 5  # tool calls allowed per hypothesis
 
 
 class OutputConfig(BaseModel):
